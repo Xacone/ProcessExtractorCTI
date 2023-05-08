@@ -6,6 +6,7 @@ import os
 import pefile
 import psutil
 import pyshark
+import csv
 import netifaces
 import sys
 import subprocess
@@ -64,6 +65,7 @@ def packet_capture_for_specific_pid(pid, interface):
             cap_filter += " or "
     global capture
     try:
+        start_time = time.time()
         capture = pyshark.LiveCapture(interface=interface, bpf_filter=cap_filter)
         for packet in capture.sniff_continuously():
             if 'IP' in packet:
@@ -75,12 +77,15 @@ def packet_capture_for_specific_pid(pid, interface):
                 whattimeisit = now.strftime("%H:%M:%S")
                 captured = f"{whattimeisit},{packet.ip.version},{packet.ip.src},{t_hdr.srcport},{packet.ip.dst},{t_hdr.dstport},{packet.ip.ttl},{packet.ip.proto},{packet.ip.flags}\n"
                 captured_csv = captured_csv + captured
-                print(captured_csv)
+                print(captured)
+                with open("PacketCaptureDump.csv", "w", encoding='utf-8') as file:
+                    file.write(captured_csv)
+
     except pyshark.capture.live_capture.UnknownInterfaceException as e:
         print("")
 
 
-def launch_packet_capture(pid):
+def launch_packet_capture(pid, max_secs):
     threads = []
 
     interfaces = netifaces.interfaces()
@@ -91,7 +96,7 @@ def launch_packet_capture(pid):
         t.start()
 
     for t in threads:
-        t.join()
+        t.join(max_secs)
 
 
 def DLL_and_Functions_Extractor(path):
@@ -110,7 +115,7 @@ def DLL_and_Functions_Extractor(path):
                 imported += "\t\t<Ordinal>" + hex(imp.ordinal) + "</Function>\n"
         imported = imported + "\t</DLL>\n"
     imported = imported + "</Header>"
-    print(imported)
+    return imported
 
 
 def EventViewerExtractor():
@@ -155,7 +160,6 @@ def EventViewerExtractor():
                     if i >= 6000:
                         concated += "</EventViewerDump>"
                         return concated
-
     return concated
 
 
@@ -255,52 +259,105 @@ def MicrosoftSingleAPIContent(functionName):
 # TODO
 # def WhoisContent() ?
 
-# TODO
-# def ip_addr_info()
 
-def launch_process(path, key):
+options = webdriver.ChromeOptions()
+options.add_argument('headless')
+options.add_argument('disable-gpu')
+# driver_ip = webdriver.Chrome(options=options)
+driver_ip = webdriver.Chrome()
+""" !!!!!!
+driver_ip.get('https://iplocation.com/')
+"""
+
+def Ip4AddrLookup(ip_addr):
+    concated = "\t<IpAddrInfo>\n"
+    search_bar = WebDriverWait(driver_ip, 15).until(EC.presence_of_element_located((By.CLASS_NAME, "input-round")))
+    search_bar.send_keys(ip_addr)
+    search_bar.send_keys(Keys.RETURN)
+
+    ActionChains(driver_ip).key_down(Keys.CONTROL).send_keys('a').key_up(Keys.CONTROL).perform()
+    search_bar.send_keys(Keys.DELETE)
+    html_content = driver_ip.page_source
+    soup = BeautifulSoup(html_content, "html.parser")
+    concated += "\t\t<IP>" + ip_addr + "</IP>\n"
+    concated += "\t\t<Latitude>" + str(soup.find('td', class_="lat").text) + "</Latitude>\n"
+    concated += "\t\t<Longitude>" + str(soup.find('td', class_="lng").text) + "</Longitude>\n"
+    concated += "\t\t<CountryName>" + str(soup.find('span', class_="country_name").text) + "</CountryName>\n"
+    concated += "\t\t<Company>" + str(soup.find('td', class_="company").text) + "</Company>\n"
+    concated += "\t</IpAddrInfo>\n"
+    return concated
+
+
+def PEfileExtractionBlock(path):
+    dll_extract_ret = DLL_and_Functions_Extractor(path)
+    with open("ExtractedDLLAndFunctions.xml", "w", encoding='utf-8') as file:
+        file.write(dll_extract_ret)
+
+
+# Thread-Injectables functions :
+
+def VirusTotalParsingBlock(key, path):
+    virus_total_xml = VirusTotalAPIContent(key, path)
+    with open("VirusTotalContent.xml", "w", encoding='utf-8') as file:
+        file.write(virus_total_xml)
+
+
+def MicrosoftAPIParsingBlock(path):
+    PEfileExtractionBlock(path)
+    final_val = "<MicrosoftAPIParsing>\n"
+    for value in functionsValuesForMsftParsing:
+        final_val += MicrosoftSingleAPIContent(value)
+    final_val += "</MicrosoftAPIParsing>\n"
+    with open("MicrosoftAPIParsedFunctions.xml", "w", encoding='utf-8') as file:
+        file.write(final_val)
+    driver.quit()
+
+
+def EventViewerExtractingBlock():
+    event_viewer_xml = EventViewerExtractor()
+    with open("EventViewerContent.xml", "w", encoding='utf-8') as file:
+        file.write(event_viewer_xml)
+
+
+def PacketCaptureBlock(path, max_secs):
+    ip_addrs_xml = "<IpAddressesInfos>\n"
+    process = subprocess.Popen(path)
+    pid = process.pid
+    print("[*] Pcap bind to process PID " + str(pid))
+    launch_packet_capture(pid, max_secs)
+    print("Capture threads done.")
+    with open("PacketCaptureDump.csv", newline='') as csvfile:
+        reader = csv.reader(csvfile, delimiter=',')
+        for row in reader:
+            ret = ""
+            #ret = Ip4AddrLookup(row[4])
+            ip_addrs_xml += ret
+    ip_addrs_xml += "<IpAddressesInfos>\n"
+    with open("IpAddressesInfos.xml", "w", encoding='utf-8') as file:
+        file.write(ip_addrs_xml)
+    driver_ip.quit()
+
+
+def launch_process(path, key, max_secs=10):
     if path and key:
 
-        """ OK
-        virus_total_xml = VirusTotalAPIContent(key, path)
-        with open("VirusTotalContent.xml", "w", encoding='utf-8') as file:
-            file.write(virus_total_xml)
-        """
+        VT = threading.Thread(target=VirusTotalParsingBlock, args=(key, path,))
+        MSFT = threading.Thread(target=MicrosoftAPIParsingBlock, args=(path,))
+        EVT = threading.Thread(target=EventViewerExtractingBlock)
+        PCAP = threading.Thread(target=PacketCaptureBlock, args=(path, max_secs,))
 
-        launched_microsoft_parsing_threads = []
-        DLL_and_Functions_Extractor(path)
-        # MicrosoftSingleAPIContent("CreateEventW")
+        VT.start()
+        MSFT.start()
+        EVT.start()
+        PCAP.start()
 
-        final_val = "<MicrosoftAPIParsing>\n"
-        for value in functionsValuesForMsftParsing:
-            final_val += MicrosoftSingleAPIContent(value)
-        final_val += "</MicrosoftAPIParsing>\n"
-        with open("MicrosoftAPIParsing.xml", "w", encoding='utf-8') as file:
-            file.write(final_val)
+        VT.join()
+        MSFT.join()
+        EVT.join()
+        PCAP.join()
 
-        driver.quit()
-
-        """ OK
-        event_viewer_xml = EventViewerExtractor()
-        with open("EventViewerContent.xml", "w", encoding='utf-8') as file:
-            file.write(event_viewer_xml)
-        """
-
-        """
-        process = subprocess.Popen(path)
-        pid = process.pid
-        print("[*] Binded to process with PID : " + str(pid))
-        # launch_packet_capture(pid)
-        """
     else:
-        print("Arguments manquants")
+        print("Arguments manquants.")
 
 
-launch_process(argv[1], argv[2])
-
-"""
-for value in functionsValuesForMsftParsing:
-    MicrosoftSingleAPIContent(value)
-"""
-
-# MicrosoftSingleAPIContent("WSAStartup")
+launch_process(argv[1], argv[2], int(argv[3]))
